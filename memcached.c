@@ -2771,6 +2771,46 @@ static void process_stats_conns(ADD_STAT add_stats, void *c) {
     }
 }
 
+#include <uuid/uuid.h>
+#include <sys/utsname.h>
+
+/* modeled after process_stat */
+static void process_dump_command(conn *c, token_t *tokens, const size_t ntokens) {
+    assert(c);
+
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    size_t ms = t.tv_sec * 1e3 + (t.tv_nsec / 1e6);
+
+    char uuid_str[64];
+    uuid_t uuid;
+    uuid_generate(uuid);
+    uuid_unparse(uuid, uuid_str);
+
+    struct utsname n;
+    if (uname(&n)) {
+        out_string(c, "SERVER_ERROR uname failed");
+        return;
+    }
+
+    char fname[256];
+    snprintf(fname, sizeof(fname), "/tmp/memc-dump_%s_%lu_%s",
+            n.nodename, ms, uuid_str);
+
+    FILE *fp = fopen(fname, "w");
+    if (!fp) {
+        out_string(c, "SERVER_ERROR failed to open output file"); 
+        return;
+    }
+    if (do_process_dump(c, fp)) {
+        out_string(c, "SERVER_ERROR failed to dump");
+        return;
+    }
+    fclose(fp);
+
+    out_string(c, "OK");
+}
+
 static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
     const char *subcommand = tokens[SUBCOMMAND_TOKEN].value;
     assert(c != NULL);
@@ -3463,6 +3503,10 @@ static void process_command(conn *c, char *command) {
     } else if (ntokens >= 2 && (strcmp(tokens[COMMAND_TOKEN].value, "stats") == 0)) {
 
         process_stat(c, tokens, ntokens);
+
+    } else if (ntokens == 2 && (strcmp(tokens[COMMAND_TOKEN].value, "dump") == 0)) {
+
+        process_dump_command(c, tokens, ntokens);
 
     } else if (ntokens >= 2 && ntokens <= 4 && (strcmp(tokens[COMMAND_TOKEN].value, "flush_all") == 0)) {
         time_t exptime = 0;

@@ -631,6 +631,33 @@ void do_item_flush_expired(void) {
     }
 }
 
+int do_process_dump(conn *c, FILE *fp)
+{
+    char line[512];
+    assert(fp);
+    assert(c);
+
+    int i;
+    item *iter, *next;
+
+    for (i = 0; i < LARGEST_ID; i++) {
+        for (iter = heads[i]; iter != NULL; iter = next) {
+            if (iter->time == 0) { // supposedly a magic object
+                break;
+            } else {
+                snprintf(line, sizeof(line), "%s %d\n",
+                        ITEM_key(iter), iter->nbytes);
+                fwrite(line, strlen(line), sizeof(*line), fp);
+                if (feof(fp) || ferror(fp))
+                    return -1;
+                next = iter->next;
+            }
+        } // for iter
+    } // for ID
+
+    return 0;
+}
+
 static void crawler_link_q(item *it) { /* item is the new tail */
     item **head, **tail;
     assert(it->slabs_clsid < LARGEST_ID);
