@@ -23,6 +23,9 @@
 
 #include "sasl_defs.h"
 
+/** [amm] Maximum size of item. */
+#define ITEM_MAX_LENGTH (1<<30)
+
 /** Maximum length of a key. */
 #define KEY_MAX_LENGTH 250
 
