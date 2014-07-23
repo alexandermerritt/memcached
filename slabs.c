@@ -118,6 +118,7 @@ void slabs_init(const size_t limit, const double factor, const bool prealloc) {
             size += CHUNK_ALIGN_BYTES - (size % CHUNK_ALIGN_BYTES);
 
         slabclass[i].size = size;
+        // [amm] assuming max item size == slab size??
         slabclass[i].perslab = settings.item_size_max / slabclass[i].size;
         size *= factor;
         if (settings.verbose > 1) {
@@ -148,6 +149,17 @@ void slabs_init(const size_t limit, const double factor, const bool prealloc) {
     }
 }
 
+// [amm] give each class one slab to work with. this might not succeed if the
+// max memory limit does not allow for that many slabs (= num classes)
+// This is what should be, ideally:
+//      max mem > (max item size [ie slab size] * num classes)
+// Number of classes is determined by the growth factor... smaller growth
+// results in more classes.
+//
+// [amm] also, if we are unable to allocate more slabs (e.g. reached global
+// memory limit) and another item is to be stored in a class which is 'full' -
+// ie no more slots left in the slabs - then instead of putting the object into
+// the next larger class, memc returns failure :-x
 static void slabs_preallocate (const unsigned int maxslabs) {
     int i;
     unsigned int prealloc = 0;
@@ -192,15 +204,34 @@ static void split_slab_page_into_freelist(char *ptr, const unsigned int id) {
     }
 }
 
+// [amm] if a slab for a class is full, allocate a new slab of size equal to max
+// item size
 static int do_slabs_newslab(const unsigned int id) {
     slabclass_t *p = &slabclass[id];
+    // [amm] yes.. slab size assumed to be max item size
+    // that's why the largest class has 1 item per slab
     int len = settings.slab_reassign ? settings.item_size_max
         : p->size * p->perslab;
     char *ptr;
 
-    if ((mem_limit && mem_malloced + len > mem_limit && p->slabs > 0) ||
-        (grow_slab_list(id) == 0) ||
-        ((ptr = memory_allocate((size_t)len)) == 0)) {
+    // [amm] Failure if:
+    // 1: there exists a memory limit, and this alloc request would cause the
+    // limit to be violated, for a cache which ALREADY has slabs assigned (i.e.
+    // even if we violate the limit, we allocate a slab to a class which has not
+    // yet received any slabs.. doesn't align with the idea of a 'memory limit')
+    // 2: ??
+    // 3: we fail to allocate a new slab
+    // Basically, this memory limit is only observed in cases where a SUBSEQUENT
+    // slab is needed. We can assign a single object to each class to force
+    // memcached to create the initial slab for it; each class gets one slab of
+    // max_item_size. With, e.g., 21 classes and max item size of 128M, we'd
+    // allocate 21 * 128M = 2.6G even if our limit was 1G. Removing the 
+    //      && p->slabs > 0
+    // condition causes even initial slabs to fail to allocate.
+    //if ((mem_limit && mem_malloced + len > mem_limit && p->slabs > 0) || // 1 orig
+    if ((mem_limit && mem_malloced + len > mem_limit) || // 1 new
+        (grow_slab_list(id) == 0) || // 2
+        ((ptr = memory_allocate((size_t)len)) == 0)) { // 3
 
         MEMCACHED_SLABS_SLABCLASS_ALLOCATE_FAILED(id);
         return 0;
@@ -209,7 +240,7 @@ static int do_slabs_newslab(const unsigned int id) {
     memset(ptr, 0, (size_t)len);
     split_slab_page_into_freelist(ptr, id);
 
-    p->slab_list[p->slabs++] = ptr;
+    p->slab_list[p->slabs++] = ptr; // [amm] add new slab to class, permanently
     mem_malloced += len;
     MEMCACHED_SLABS_SLABCLASS_ALLOCATE(id);
 
