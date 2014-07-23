@@ -5,6 +5,6 @@ set -u
 
 for ip in 192.168.1.221 192.168.1.222
 do
-    echo 'dump' | netcat -C $ip 11211
+    echo 'dump at /scratch/merrital' | netcat -C $ip 11211
 done
 

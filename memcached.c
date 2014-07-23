@@ -2771,21 +2771,34 @@ static void process_stats_conns(ADD_STAT add_stats, void *c) {
     }
 }
 
-#include <uuid/uuid.h>
 #include <sys/utsname.h>
 
-/* modeled after process_stat */
+// Modeled after process_stat. Command syntax:
+//  dump                        ntokens=2
+//  dump at /path/to/dir        ntokens=4
 static void process_dump_command(conn *c, token_t *tokens, const size_t ntokens) {
+    const char *subcommand = tokens[SUBCOMMAND_TOKEN].value;
+    char dirpath[128] = "/tmp";
+
     assert(c);
+
+    if (ntokens >= 3) {
+        if (strncmp(subcommand, "at", strlen("at")) != 0) {
+            out_string(c, "CLIENT_ERROR invalid 'dump' subcommand");
+            return;
+        } else if (ntokens == 3) {
+            out_string(c, "CLIENT_ERROR 'dump at' needs path");
+            return;
+        } else if (ntokens > 4) {
+            out_string(c, "CLIENT_ERROR 'dump' has too many arguments");
+            return;
+        }
+        snprintf(dirpath, sizeof(dirpath), "%s", tokens[SUBCOMMAND_TOKEN + 1].value);
+    }
 
     struct timespec t;
     clock_gettime(CLOCK_REALTIME, &t);
     size_t ms = t.tv_sec * 1e3 + (t.tv_nsec / 1e6);
-
-    char uuid_str[64];
-    uuid_t uuid;
-    uuid_generate(uuid);
-    uuid_unparse(uuid, uuid_str);
 
     struct utsname n;
     if (uname(&n)) {
@@ -2793,10 +2806,11 @@ static void process_dump_command(conn *c, token_t *tokens, const size_t ntokens)
         return;
     }
 
-    char fname[256];
-    snprintf(fname, sizeof(fname), "/tmp/memc-dump_%s_%lu_%s",
-            n.nodename, ms, uuid_str);
+    char fname[512];
+    snprintf(fname, sizeof(fname), "%s/memc-dump.%s.%lu",
+            dirpath, n.nodename, ms);
 
+    errno = 0;
     FILE *fp = fopen(fname, "w");
     if (!fp) {
         out_string(c, "SERVER_ERROR failed to open output file"); 
@@ -2808,7 +2822,9 @@ static void process_dump_command(conn *c, token_t *tokens, const size_t ntokens)
     }
     fclose(fp);
 
-    out_string(c, "OK");
+    char msg[256];
+    snprintf(msg, sizeof(msg), "OK %s", fname);
+    out_string(c, msg);
 }
 
 static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
@@ -3504,7 +3520,7 @@ static void process_command(conn *c, char *command) {
 
         process_stat(c, tokens, ntokens);
 
-    } else if (ntokens == 2 && (strcmp(tokens[COMMAND_TOKEN].value, "dump") == 0)) {
+    } else if (ntokens >= 2 && ntokens <= 4 && (strcmp(tokens[COMMAND_TOKEN].value, "dump") == 0)) {
 
         process_dump_command(c, tokens, ntokens);
 

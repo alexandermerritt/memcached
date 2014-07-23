@@ -640,20 +640,21 @@ int do_process_dump(conn *c, FILE *fp)
     int i;
     item *iter, *next;
 
+    snprintf(line, sizeof(line), "key bytes\n");
+    fwrite(line, strlen(line), sizeof(*line), fp);
+
     for (i = 0; i < LARGEST_ID; i++) {
         for (iter = heads[i]; iter != NULL; iter = next) {
-            if (iter->time == 0) { // supposedly a magic object
+            if (iter->time == 0) // supposedly a magic object
                 break;
-            } else {
-                snprintf(line, sizeof(line), "%s %d\n",
-                        ITEM_key(iter), iter->nbytes);
-                fwrite(line, strlen(line), sizeof(*line), fp);
-                if (feof(fp) || ferror(fp))
-                    return -1;
-                next = iter->next;
-            }
-        } // for iter
-    } // for ID
+            snprintf(line, sizeof(line), "%s %d\n",
+                    ITEM_key(iter), iter->nbytes);
+            fwrite(line, strlen(line), sizeof(*line), fp);
+            if (feof(fp) || ferror(fp))
+                return -1;
+            next = iter->next;
+        }
+    }
 
     return 0;
 }
