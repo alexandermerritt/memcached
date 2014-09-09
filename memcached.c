@@ -23,6 +23,7 @@
 #include <sys/uio.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include <pthread.h>
 
 /* some POSIX systems need the following definition
  * to get mlockall flags out of sys/mman.h.  */
@@ -2779,6 +2780,7 @@ static void process_stats_conns(ADD_STAT add_stats, void *c) {
 static void process_dump_command(conn *c, token_t *tokens, const size_t ntokens) {
     const char *subcommand = tokens[SUBCOMMAND_TOKEN].value;
     char dirpath[128] = "/tmp";
+    FILE *fp = NULL;
 
     assert(c);
 
@@ -2803,7 +2805,7 @@ static void process_dump_command(conn *c, token_t *tokens, const size_t ntokens)
     struct utsname n;
     if (uname(&n)) {
         out_string(c, "SERVER_ERROR uname failed");
-        return;
+        goto out_error;
     }
 
     char fname[512];
@@ -2811,20 +2813,25 @@ static void process_dump_command(conn *c, token_t *tokens, const size_t ntokens)
             dirpath, n.nodename, ms);
 
     errno = 0;
-    FILE *fp = fopen(fname, "w");
+    fp = fopen(fname, "w");
     if (!fp) {
         out_string(c, "SERVER_ERROR failed to open output file"); 
-        return;
+        goto out_error;
     }
     if (do_process_dump(c, fp)) {
         out_string(c, "SERVER_ERROR failed to dump");
-        return;
+        goto out_error;
     }
-    fclose(fp);
 
+    fclose(fp);
     char msg[256];
     snprintf(msg, sizeof(msg), "OK %s", fname);
     out_string(c, msg);
+    return;
+
+out_error:
+    if (fp)
+        fclose(fp);
 }
 
 static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
@@ -2915,6 +2922,8 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
     char *suffix;
     assert(c != NULL);
 
+    log_e *entry = NULL;
+
     do {
         while(key_token->length != 0) {
 
@@ -3004,6 +3013,11 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                 }
                 else
                 {
+                  entry = log_getnext();
+                  entry->op = OP_GET;
+                  strncpy(entry->key, ITEM_key(it), it->nkey);
+                  entry->len = it->nbytes;
+
                   MEMCACHED_COMMAND_GET(c->sfd, ITEM_key(it), it->nkey,
                                         it->nbytes, ITEM_get_cas(it));
                   if (add_iov(c, "VALUE ", 6) != 0 ||
@@ -3093,6 +3107,8 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
 
     assert(c != NULL);
 
+    log_e *entry = NULL;
+
     set_noreply_maybe(c, tokens, ntokens);
 
     if (tokens[KEY_TOKEN].length > KEY_MAX_LENGTH) {
@@ -3167,6 +3183,12 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
     c->rlbytes = it->nbytes;
     c->cmd = comm;
     conn_set_state(c, conn_nread);
+
+    entry = log_getnext();
+    entry->op = OP_UPDATE;
+    strncpy(entry->key, ITEM_key(it), it->nkey);
+    entry->len = it->nbytes;
+
 }
 
 static void process_touch_command(conn *c, token_t *tokens, const size_t ntokens) {
@@ -3369,6 +3391,7 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
     char *key;
     size_t nkey;
     item *it;
+    log_e *entry = NULL;
 
     assert(c != NULL);
 
@@ -3399,6 +3422,11 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
 
     it = item_get(key, nkey);
     if (it) {
+        entry = log_getnext();
+        entry->op = OP_DELETE;
+        strncpy(entry->key, ITEM_key(it), it->nkey);
+        entry->len = it->nbytes;
+
         MEMCACHED_COMMAND_DELETE(c->sfd, ITEM_key(it), it->nkey);
 
         pthread_mutex_lock(&c->thread->stats.mutex);
@@ -4409,6 +4437,8 @@ void event_handler(const int fd, const short which, void *arg) {
         conn_close(c);
         return;
     }
+
+    log_initlocal();
 
     drive_machine(c);
 

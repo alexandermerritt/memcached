@@ -631,30 +631,53 @@ void do_item_flush_expired(void) {
     }
 }
 
-int do_process_dump(conn *c, FILE *fp)
+static int objects_dumpto(FILE *fp)
 {
-    char line[512];
-    assert(fp);
-    assert(c);
-
-    int i;
+    const char obj_fmt[] = "%s %d\n";
     item *iter, *next;
+    char line[512];
+    int i;
+    size_t len;
 
-    snprintf(line, sizeof(line), "key bytes\n");
-    fwrite(line, strlen(line), sizeof(*line), fp);
+    if (!fp)
+        return -1;
+
+    snprintf(line, sizeof(line), "==OBJECTS==\nkey bytes\n");
+    len = strlen(line);
+    if (len > fwrite(line, sizeof(*line), len, fp))
+        return -1;
 
     for (i = 0; i < LARGEST_ID; i++) {
         for (iter = heads[i]; iter != NULL; iter = next) {
             if (iter->time == 0) // supposedly a magic object
                 break;
-            snprintf(line, sizeof(line), "%s %d\n",
+            snprintf(line, sizeof(line), obj_fmt,
                     ITEM_key(iter), iter->nbytes);
-            fwrite(line, strlen(line), sizeof(*line), fp);
+            len = strlen(line);
+            if (len > fwrite(line, sizeof(*line), len, fp))
+                return -1;
             if (feof(fp) || ferror(fp))
                 return -1;
             next = iter->next;
         }
     }
+    return 0;
+}
+
+// these functions need to be in this file as it needs access to the private
+// global state
+int do_process_dump(conn *c, FILE *fp)
+{
+    assert(fp);
+    assert(c);
+
+    if (objects_dumpto(fp))
+        return -1;
+
+    if (log_dumpto(fp))
+        return -1;
+
+    log_resetall();
 
     return 0;
 }
