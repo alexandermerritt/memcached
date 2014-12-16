@@ -3,7 +3,7 @@ set -e
 set -u
 
 getib() {
-    ifconfig ib1 | grep 'inet addr' | cut -d ':' -f 2 | cut -d ' ' -f1
+    /sbin/ifconfig ib0 | grep 'inet addr' | cut -d ':' -f 2 | cut -d ' ' -f1
 }
 
 echo listening on $(getib)
