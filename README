@@ -1,6 +1,27 @@
+------------------------------------------------
+-- BUILD
+------------------------------------------------
+
 If you've installed libevent locally, specify the path to your local
 install directory
 
 ./configure --with-libevent=$HOME/local
 
 where $HOME/local is the equivalent to /usr/local
+
+------------------------------------------------
+-- RUN
+------------------------------------------------
+
+If running locally
+
+    ./run.sh [extra args]
+
+If running via ssh
+
+    ssh machine /path/to/ssh-run.sh
+
+For a set of machines
+
+    ./restart-memc.sh
+
