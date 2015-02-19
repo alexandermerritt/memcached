@@ -1,0 +1,6 @@
+If you've installed libevent locally, specify the path to your local
+install directory
+
+./configure --with-libevent=$HOME/local
+
+where $HOME/local is the equivalent to /usr/local
