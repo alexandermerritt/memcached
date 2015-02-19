@@ -9,4 +9,4 @@ getib() {
 echo listening on $(getib)
 
 # -m is in MiB
-./memcached -f 2 -p 11211 -u memcache -l $(getib) -M -m $((16 * 1024)) $@
+./memcached -f 2.5 -p 11211 -u memcache -l $(getib) -M -m $((16 * 1024)) $@
