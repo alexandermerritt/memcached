@@ -3016,6 +3016,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                   entry = log_getnext();
                   entry->op = OP_GET;
                   strncpy(entry->key, ITEM_key(it), it->nkey);
+                  entry->key[it->nkey] = '\0';
                   entry->len = it->nbytes;
 
                   MEMCACHED_COMMAND_GET(c->sfd, ITEM_key(it), it->nkey,
