@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <sys/syscall.h>
+#include <arpa/inet.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -121,6 +122,24 @@ void log_resetall(void)
             log->slab = log->next = 0;
 }
 
+static void getaddr(const struct sockaddr_storage *saddr,
+        char *out_ip, size_t iplen, int *out_port)
+{
+    if (!out_ip || iplen < 1 || !out_port)
+        abort();
+    // getpeername was already invoked by memcached in conn_new
+    if (saddr->ss_family == AF_INET) {
+        struct sockaddr_in *s = (struct sockaddr_in *)saddr;
+        *out_port = ntohs(s->sin_port);
+        inet_ntop(AF_INET, &s->sin_addr, out_ip, iplen);
+    } else {
+        struct sockaddr_in6 *s = (struct sockaddr_in6 *)saddr;
+        *out_port = ntohs(s->sin6_port);
+        inet_ntop(AF_INET6, &s->sin6_addr, out_ip, iplen);
+    }
+    out_ip[iplen] = '\0';
+}
+
 int log_dumpto(FILE *fp)
 {
     char line[512];
@@ -130,9 +149,11 @@ int log_dumpto(FILE *fp)
     if (!fp)
         return -1;
 
-    const char entry_fmt[] = "%d %lu %s %s %lu\n";
+    const char entry_fmt[] = "%d %s %d %lu %s %s %lu\n";
+    char ipstr[16 + 1]; // ipv6 is 128 bits, one for nul
+    int port;
 
-    snprintf(line, sizeof(line), "==TRACE==\ntid time_ns op key len\n");
+    snprintf(line, sizeof(line), "==TRACE==\ntid ip:port time_ns op key len\n");
     len = strlen(line);
     if (len > fwrite(line, sizeof(*line), len, fp))
         return -1;
@@ -147,8 +168,9 @@ int log_dumpto(FILE *fp)
         for (slab = 0; slab < log->slab; slab++) {
             for (e = 0; e < LOG_SLAB_ENTRIES; e++) {
                 const log_e *entry = &log->slabs[slab][e];
+                getaddr(&entry->saddr, ipstr, sizeof(ipstr), &port);
                 snprintf(line, sizeof(line),
-                        entry_fmt, log->tid,
+                        entry_fmt, log->tid, ipstr, port,
                         entry->ns, log_op_strings[entry->op],
                         entry->key, entry->len);
                 len = strlen(line);
@@ -162,8 +184,9 @@ int log_dumpto(FILE *fp)
         slab = log->slab;
         for (e = 0; e < log->next; e++) {
             const log_e *entry = &log->slabs[slab][e];
+            getaddr(&entry->saddr, ipstr, sizeof(ipstr), &port);
             snprintf(line, sizeof(line),
-                    entry_fmt, log->tid,
+                    entry_fmt, log->tid, ipstr, port,
                     entry->ns, log_op_strings[entry->op],
                     entry->key, entry->len);
             len = strlen(line);

@@ -10,6 +10,8 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
 #include "defines.h"
 
 /* defines */
@@ -35,9 +37,25 @@ struct _log_entry
     char key[KEY_MAX_LENGTH]; // XXX keys assumed to be ASCII
     size_t ns, len;
     enum LOG_OP op;
-    // TODO client issuing request to server
+    // client issuing request to server
+    struct sockaddr_storage saddr;
     // TODO request latency
 } __attribute__((packed));
+
+static inline void
+_entry_set_saddr(struct _log_entry *e,
+        struct sockaddr_storage *saddr)
+{
+    memset(&e->saddr, 0, sizeof(e->saddr));
+    memcpy(&e->saddr, saddr, sizeof(*saddr));
+}
+
+static inline void
+entry_set_saddr(struct _log_entry *e,
+        struct sockaddr_in6 *saddr)
+{
+    _entry_set_saddr(e, (struct sockaddr_storage*)saddr);
+}
 
 struct _log
 {

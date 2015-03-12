@@ -3018,6 +3018,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                   strncpy(entry->key, ITEM_key(it), it->nkey);
                   entry->key[it->nkey] = '\0';
                   entry->len = it->nbytes;
+                  entry_set_saddr(entry, &c->request_addr);
 
                   MEMCACHED_COMMAND_GET(c->sfd, ITEM_key(it), it->nkey,
                                         it->nbytes, ITEM_get_cas(it));
@@ -3189,6 +3190,7 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
     entry->op = OP_UPDATE;
     strncpy(entry->key, ITEM_key(it), it->nkey);
     entry->len = it->nbytes;
+    entry_set_saddr(entry, &c->request_addr);
 
 }
 
@@ -3427,6 +3429,7 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
         entry->op = OP_DELETE;
         strncpy(entry->key, ITEM_key(it), it->nkey);
         entry->len = it->nbytes;
+        entry_set_saddr(entry, &c->request_addr);
 
         MEMCACHED_COMMAND_DELETE(c->sfd, ITEM_key(it), it->nkey);
 
