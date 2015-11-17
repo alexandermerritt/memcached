@@ -36,8 +36,8 @@ struct conn_queue {
     pthread_mutex_t lock;
 };
 
-/* Lock for cache operations (item_*, assoc_*) */
-pthread_mutex_t cache_lock;
+/* Locks for cache LRU operations */
+pthread_mutex_t lru_locks[POWER_LARGEST];
 
 /* Connection lock around accepting new connections */
 pthread_mutex_t conn_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -47,7 +47,10 @@ pthread_mutex_t atomics_mutex = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
 /* Lock for global stats */
-static pthread_mutex_t stats_lock;
+static pthread_mutex_t stats_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Lock to cause worker threads to hang up after being woken */
+static pthread_mutex_t worker_hang_lock;
 
 /* Free list of CQ_ITEM structs */
 static CQ_ITEM *cqi_freelist;
@@ -56,13 +59,9 @@ static pthread_mutex_t cqi_freelist_lock;
 static pthread_mutex_t *item_locks;
 /* size of the item lock hash table */
 static uint32_t item_lock_count;
-static unsigned int item_lock_hashpower;
+unsigned int item_lock_hashpower;
 #define hashsize(n) ((unsigned long int)1<<(n))
 #define hashmask(n) (hashsize(n)-1)
-/* this lock is temporarily engaged during a hash table expansion */
-static pthread_mutex_t item_global_lock;
-/* thread-specific variable for deeply finding the item lock type */
-static pthread_key_t item_lock_type_key;
 
 static LIBEVENT_DISPATCHER_THREAD dispatcher_thread;
 
@@ -112,31 +111,18 @@ unsigned short refcount_decr(unsigned short *refcount) {
 #endif
 }
 
-/* Convenience functions for calling *only* when in ITEM_LOCK_GLOBAL mode */
-void item_lock_global(void) {
-    mutex_lock(&item_global_lock);
-}
-
-void item_unlock_global(void) {
-    mutex_unlock(&item_global_lock);
-}
+/* item_lock() must be held for an item before any modifications to either its
+ * associated hash bucket, or the structure itself.
+ * LRU modifications must hold the item lock, and the LRU lock.
+ * LRU's accessing items must item_trylock() before modifying an item.
+ * Items accessable from an LRU must not be freed or modified
+ * without first locking and removing from the LRU.
+ */
 
 void item_lock(uint32_t hv) {
-    uint8_t *lock_type = pthread_getspecific(item_lock_type_key);
-    if (likely(*lock_type == ITEM_LOCK_GRANULAR)) {
-        mutex_lock(&item_locks[hv & hashmask(item_lock_hashpower)]);
-    } else {
-        mutex_lock(&item_global_lock);
-    }
+    mutex_lock(&item_locks[hv & hashmask(item_lock_hashpower)]);
 }
 
-/* Special case. When ITEM_LOCK_GLOBAL mode is enabled, this should become a
- * no-op, as it's only called from within the item lock if necessary.
- * However, we can't mix a no-op and threads which are still synchronizing to
- * GLOBAL. So instead we just always try to lock. When in GLOBAL mode this
- * turns into an effective no-op. Threads re-synchronize after the power level
- * switch so it should stay safe.
- */
 void *item_trylock(uint32_t hv) {
     pthread_mutex_t *lock = &item_locks[hv & hashmask(item_lock_hashpower)];
     if (pthread_mutex_trylock(lock) == 0) {
@@ -150,12 +136,7 @@ void item_trylock_unlock(void *lock) {
 }
 
 void item_unlock(uint32_t hv) {
-    uint8_t *lock_type = pthread_getspecific(item_lock_type_key);
-    if (likely(*lock_type == ITEM_LOCK_GRANULAR)) {
-        mutex_unlock(&item_locks[hv & hashmask(item_lock_hashpower)]);
-    } else {
-        mutex_unlock(&item_global_lock);
-    }
+    mutex_unlock(&item_locks[hv & hashmask(item_lock_hashpower)]);
 }
 
 static void wait_for_thread_registration(int nthreads) {
@@ -169,23 +150,42 @@ static void register_thread_initialized(void) {
     init_count++;
     pthread_cond_signal(&init_cond);
     pthread_mutex_unlock(&init_lock);
+    /* Force worker threads to pile up if someone wants us to */
+    pthread_mutex_lock(&worker_hang_lock);
+    pthread_mutex_unlock(&worker_hang_lock);
 }
 
-void switch_item_lock_type(enum item_lock_types type) {
+/* Must not be called with any deeper locks held */
+void pause_threads(enum pause_thread_types type) {
     char buf[1];
     int i;
 
+    buf[0] = 0;
     switch (type) {
-        case ITEM_LOCK_GRANULAR:
-            buf[0] = 'l';
+        case PAUSE_ALL_THREADS:
+            slabs_rebalancer_pause();
+            lru_crawler_pause();
+            lru_maintainer_pause();
+        case PAUSE_WORKER_THREADS:
+            buf[0] = 'p';
+            pthread_mutex_lock(&worker_hang_lock);
             break;
-        case ITEM_LOCK_GLOBAL:
-            buf[0] = 'g';
+        case RESUME_ALL_THREADS:
+            slabs_rebalancer_resume();
+            lru_crawler_resume();
+            lru_maintainer_resume();
+        case RESUME_WORKER_THREADS:
+            pthread_mutex_unlock(&worker_hang_lock);
             break;
         default:
             fprintf(stderr, "Unknown lock type: %d\n", type);
             assert(1 == 0);
             break;
+    }
+
+    /* Only send a message if we have one. */
+    if (buf[0] == 0) {
+        return;
     }
 
     pthread_mutex_lock(&init_lock);
@@ -370,16 +370,9 @@ static void setup_thread(LIBEVENT_THREAD *me) {
 static void *worker_libevent(void *arg) {
     LIBEVENT_THREAD *me = arg;
 
-    /* Any per-thread setup can happen here; thread_init() will block until
+    /* Any per-thread setup can happen here; memcached_thread_init() will block until
      * all threads have finished initializing.
      */
-
-    /* set an indexable thread-specific memory item for the lock type.
-     * this could be unnecessary if we pass the conn *c struct through
-     * all item_lock calls...
-     */
-    me->item_lock_type = ITEM_LOCK_GRANULAR;
-    pthread_setspecific(item_lock_type_key, &me->item_lock_type);
 
     register_thread_initialized();
 
@@ -425,13 +418,8 @@ static void thread_libevent_process(int fd, short which, void *arg) {
         cqi_free(item);
     }
         break;
-    /* we were told to flip the lock type and report in */
-    case 'l':
-    me->item_lock_type = ITEM_LOCK_GRANULAR;
-    register_thread_initialized();
-        break;
-    case 'g':
-    me->item_lock_type = ITEM_LOCK_GLOBAL;
+    /* we were told to pause and report in */
+    case 'p':
     register_thread_initialized();
         break;
     }
@@ -610,51 +598,6 @@ enum store_item_type store_item(item *item, int comm, conn* c) {
     return ret;
 }
 
-/*
- * Flushes expired items after a flush_all call
- */
-void item_flush_expired() {
-    mutex_lock(&cache_lock);
-    do_item_flush_expired();
-    mutex_unlock(&cache_lock);
-}
-
-/*
- * Dumps part of the cache
- */
-char *item_cachedump(unsigned int slabs_clsid, unsigned int limit, unsigned int *bytes) {
-    char *ret;
-
-    mutex_lock(&cache_lock);
-    ret = do_item_cachedump(slabs_clsid, limit, bytes);
-    mutex_unlock(&cache_lock);
-    return ret;
-}
-
-/*
- * Dumps statistics about slab classes
- */
-void  item_stats(ADD_STAT add_stats, void *c) {
-    mutex_lock(&cache_lock);
-    do_item_stats(add_stats, c);
-    mutex_unlock(&cache_lock);
-}
-
-void  item_stats_totals(ADD_STAT add_stats, void *c) {
-    mutex_lock(&cache_lock);
-    do_item_stats_totals(add_stats, c);
-    mutex_unlock(&cache_lock);
-}
-
-/*
- * Dumps a list of objects of each size in 32-byte increments
- */
-void  item_stats_sizes(ADD_STAT add_stats, void *c) {
-    mutex_lock(&cache_lock);
-    do_item_stats_sizes(add_stats, c);
-    mutex_unlock(&cache_lock);
-}
-
 /******************************* GLOBAL STATS ******************************/
 
 void STATS_LOCK() {
@@ -778,12 +721,14 @@ void slab_stats_aggregate(struct thread_stats *stats, struct slab_stats *out) {
  * nthreads  Number of worker event handler threads to spawn
  * main_base Event base for main thread
  */
-void thread_init(int nthreads, struct event_base *main_base) {
+void memcached_thread_init(int nthreads, struct event_base *main_base) {
     int         i;
     int         power;
 
-    pthread_mutex_init(&cache_lock, NULL);
-    pthread_mutex_init(&stats_lock, NULL);
+    for (i = 0; i < POWER_LARGEST; i++) {
+        pthread_mutex_init(&lru_locks[i], NULL);
+    }
+    pthread_mutex_init(&worker_hang_lock, NULL);
 
     pthread_mutex_init(&init_lock, NULL);
     pthread_cond_init(&init_cond, NULL);
@@ -803,6 +748,13 @@ void thread_init(int nthreads, struct event_base *main_base) {
         power = 13;
     }
 
+    if (power >= hashpower) {
+        fprintf(stderr, "Hash table power size (%d) cannot be equal to or less than item lock table (%d)\n", hashpower, power);
+        fprintf(stderr, "Item lock table grows with `-t N` (worker threadcount)\n");
+        fprintf(stderr, "Hash table grows with `-o hashpower=N` \n");
+        exit(1);
+    }
+
     item_lock_count = hashsize(power);
     item_lock_hashpower = power;
 
@@ -814,8 +766,6 @@ void thread_init(int nthreads, struct event_base *main_base) {
     for (i = 0; i < item_lock_count; i++) {
         pthread_mutex_init(&item_locks[i], NULL);
     }
-    pthread_key_create(&item_lock_type_key, NULL);
-    pthread_mutex_init(&item_global_lock, NULL);
 
     threads = calloc(nthreads, sizeof(LIBEVENT_THREAD));
     if (! threads) {
