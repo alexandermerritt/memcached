@@ -232,16 +232,15 @@ static int do_slabs_newslab(const unsigned int id) {
     //      && p->slabs > 0
     // condition causes even initial slabs to fail to allocate.
     //if ((mem_limit && mem_malloced + len > mem_limit && p->slabs > 0) || // 1 orig
-    if ((mem_limit && mem_malloced + len > mem_limit) || // 1 new
-        (grow_slab_list(id) == 0) || // 2
-        ((ptr = memory_allocate((size_t)len)) == 0)) { // 3
-#if 0
+    //if ((mem_limit && mem_malloced + len > mem_limit) || // 1 new
+        //(grow_slab_list(id) == 0) || // 2
+        //((ptr = memory_allocate((size_t)len)) == 0)) { // 3
+
     if ((mem_limit && mem_malloced + len > mem_limit && p->slabs > 0)) {
         mem_limit_reached = true;
         MEMCACHED_SLABS_SLABCLASS_ALLOCATE_FAILED(id);
         return 0;
     }
-#endif
 
     if ((grow_slab_list(id) == 0) ||
         ((ptr = memory_allocate((size_t)len)) == 0)) {
